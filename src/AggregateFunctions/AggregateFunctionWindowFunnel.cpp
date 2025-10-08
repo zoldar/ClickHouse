@@ -5,7 +5,9 @@
 #include <DataTypes/DataTypeDateTime.h>
 #include <base/range.h>
 
+#include <Columns/ColumnArray.h>
 #include <Columns/ColumnsNumber.h>
+#include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
@@ -31,6 +33,29 @@ namespace
 
 constexpr size_t MAX_EVENTS = 32;
 
+template <bool Topen>
+struct WindowFunnelTrait
+{
+    static constexpr bool open = Topen;
+};
+
+template <typename Trait>
+constexpr const char * getNameByTrait()
+{
+    if constexpr (Trait::open)
+        return "openWindowFunnel";
+
+    return "windowFunnel";
+}
+
+template <typename Trait>
+DataTypePtr getDataTypeByTrait()
+{
+    if constexpr (Trait::open)
+        return std::make_shared<DataTypeArray>(std::make_shared<DataTypeUInt8>());
+
+    return std::make_shared<DataTypeUInt8>();
+}
 
 template <typename T>
 void mergeEventsList(T & events_list, size_t prefix_size, bool prefix_sorted, bool suffix_sorted)
@@ -273,9 +298,9 @@ struct AggregateFunctionWindowFunnelStrictOnceData
   * Usage:
   * - windowFunnel(window)(timestamp, cond1, cond2, cond3, ....)
   */
-template <typename T, typename Data>
+template <typename T, typename Data, typename Trait>
 class AggregateFunctionWindowFunnel final
-    : public IAggregateFunctionDataHelper<Data, AggregateFunctionWindowFunnel<T, Data>>
+    : public IAggregateFunctionDataHelper<Data, AggregateFunctionWindowFunnel<T, Data, Trait>>
 {
 private:
     UInt64 window;
@@ -453,6 +478,29 @@ private:
         return 0;
     }
 
+    std::vector<UInt8> getOpenEventsNonStrictOnce(const AggregateFunctionWindowFunnelData<T>::TimestampEvents & events_list) const
+    {
+        std::vector<UInt8> funnel;
+
+        for (size_t i = 0; i < events_list.size(); ++i)
+        {
+            continue;
+        }
+
+        return funnel;
+    }
+
+    std::vector<UInt8> getOpenEventsStrictOnce(const AggregateFunctionWindowFunnelStrictOnceData<T>::TimestampEvents & events_list) const
+    {
+        std::vector<UInt8> funnel;
+
+        for (size_t i = 0; i < events_list.size(); ++i)
+        {
+            continue;
+        }
+
+        return funnel;
+    }
 
     UInt8 getEventLevel(Data & data) const
     {
@@ -469,14 +517,27 @@ private:
             return getEventLevelNonStrictOnce(data.events_list);
     }
 
+    std::vector<UInt8> getOpenEvents(Data & data) const
+    {
+        if (data.size() == 0)
+            return std::vector<UInt8>();
+
+        data.sort();
+
+        if constexpr (Data::strict_once_enabled)
+            return getOpenEventsStrictOnce(data.events_list);
+        else
+            return getOpenEventsNonStrictOnce(data.events_list);
+    }
+
 public:
     String getName() const override
     {
-        return "windowFunnel";
+        return getNameByTrait<Trait>();
     }
 
     AggregateFunctionWindowFunnel(const DataTypes & arguments, const Array & params)
-        : IAggregateFunctionDataHelper<Data, AggregateFunctionWindowFunnel<T, Data>>(arguments, params, std::make_shared<DataTypeUInt8>())
+        : IAggregateFunctionDataHelper<Data, AggregateFunctionWindowFunnel<T, Data, Trait>>(arguments, params, getDataTypeByTrait<Trait>())
     {
         events_size = arguments.size() - 1;
         window = params.at(0).safeGet<UInt64>();
@@ -544,11 +605,29 @@ public:
 
     void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
     {
-        assert_cast<ColumnUInt8 &>(to).getData().push_back(getEventLevel(this->data(place)));
+        if (!Trait::open) {
+            assert_cast<ColumnUInt8 &>(to).getData().push_back(getEventLevel(this->data(place)));
+        } else {
+            ColumnArray & arr_to = assert_cast<ColumnArray &>(to);
+            ColumnArray::Offsets & offsets_to = arr_to.getOffsets();
+
+            const std::vector<UInt8> & events = getOpenEvents(this->data(place));
+            size_t size = events.size();
+
+            offsets_to.push_back(offsets_to.back() + size);
+
+            typename ColumnVector<UInt8>::Container & data_to = assert_cast<ColumnVector<UInt8> &>(arr_to.getData()).getData();
+            size_t old_size = data_to.size();
+            data_to.resize(old_size + size);
+
+            size_t i = 0;
+            for (auto it = events.begin(); it != events.end(); ++it, ++i)
+                data_to[old_size + i] = *it;
+        }
     }
 };
 
-
+template <typename Trait>
 AggregateFunctionPtr
 createAggregateFunctionWindowFunnel(const std::string & name, const DataTypes & arguments, const Array & params, const Settings *)
 {
@@ -576,25 +655,25 @@ createAggregateFunctionWindowFunnel(const std::string & name, const DataTypes & 
     bool strict_once = params.size() > 1 && std::any_of(params.begin() + 1, params.end(), [](const auto & f) { return f.template safeGet<String>() == "strict_once"; });
     if (strict_once)
     {
-        AggregateFunctionPtr res(createWithUnsignedIntegerType<AggregateFunctionWindowFunnel, AggregateFunctionWindowFunnelStrictOnceData>(*arguments[0], arguments, params));
+        AggregateFunctionPtr res(new AggregateFunctionWindowFunnel<UInt32, AggregateFunctionWindowFunnelStrictOnceData<UInt32>, Trait>(arguments, params));
         WhichDataType which(arguments.front().get());
         if (res)
             return res;
         if (which.isDate())
-            return std::make_shared<AggregateFunctionWindowFunnel<DataTypeDate::FieldType, AggregateFunctionWindowFunnelStrictOnceData<DataTypeDate::FieldType>>>(arguments, params);
+            return std::make_shared<AggregateFunctionWindowFunnel<DataTypeDate::FieldType, AggregateFunctionWindowFunnelStrictOnceData<DataTypeDate::FieldType>, Trait>>(arguments, params);
         if (which.isDateTime())
-            return std::make_shared<AggregateFunctionWindowFunnel<DataTypeDateTime::FieldType, AggregateFunctionWindowFunnelStrictOnceData<DataTypeDateTime::FieldType>>>(arguments, params);
+            return std::make_shared<AggregateFunctionWindowFunnel<DataTypeDateTime::FieldType, AggregateFunctionWindowFunnelStrictOnceData<DataTypeDateTime::FieldType>, Trait>>(arguments, params);
     }
     else
     {
-        AggregateFunctionPtr res(createWithUnsignedIntegerType<AggregateFunctionWindowFunnel, AggregateFunctionWindowFunnelData>(*arguments[0], arguments, params));
+        AggregateFunctionPtr res(new AggregateFunctionWindowFunnel<UInt32, AggregateFunctionWindowFunnelData<UInt32>, Trait>(arguments, params));
         WhichDataType which(arguments.front().get());
         if (res)
             return res;
         if (which.isDate())
-            return std::make_shared<AggregateFunctionWindowFunnel<DataTypeDate::FieldType, AggregateFunctionWindowFunnelData<DataTypeDate::FieldType>>>(arguments, params);
+            return std::make_shared<AggregateFunctionWindowFunnel<DataTypeDate::FieldType, AggregateFunctionWindowFunnelData<DataTypeDate::FieldType>, Trait>>(arguments, params);
         if (which.isDateTime())
-            return std::make_shared<AggregateFunctionWindowFunnel<DataTypeDateTime::FieldType, AggregateFunctionWindowFunnelData<DataTypeDateTime::FieldType>>>(arguments, params);
+            return std::make_shared<AggregateFunctionWindowFunnel<DataTypeDateTime::FieldType, AggregateFunctionWindowFunnelData<DataTypeDateTime::FieldType>, Trait>>(arguments, params);
     }
     throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
                     "Illegal type {} of first argument of aggregate function {}, must "
@@ -605,7 +684,8 @@ createAggregateFunctionWindowFunnel(const std::string & name, const DataTypes & 
 
 void registerAggregateFunctionWindowFunnel(AggregateFunctionFactory & factory)
 {
-    factory.registerFunction("windowFunnel", createAggregateFunctionWindowFunnel);
+    factory.registerFunction("windowFunnel", createAggregateFunctionWindowFunnel<WindowFunnelTrait<false>>);
+    factory.registerFunction("openWindowFunnel", createAggregateFunctionWindowFunnel<WindowFunnelTrait<true>>);
 }
 
 }
