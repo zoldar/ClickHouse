@@ -482,33 +482,62 @@ private:
     {
         std::vector<UInt8> funnel;
 
-        std::vector<std::optional<std::pair<UInt64, UInt64>>> events_timestamp(events_size);
+        std::vector<std::vector<std::optional<std::pair<UInt64, UInt64>>>> events_timestamp(events_size);
+        std::vector<bool> events_complete(events_size);
+
+        for (size_t i = 0; i < events_size; i++)
+        {
+            events_timestamp[i] = std::vector<std::optional<std::pair<UInt64, UInt64>>>(events_size);
+            events_complete[i] = false;
+        }
+
         for (size_t i = 0; i < events_list.size(); ++i)
         {
             const T & timestamp = events_list[i].first;
             const auto & event_idx = events_list[i].second - 1;
-            if (event_idx == 0)
-            {
-                events_timestamp[0] = std::make_pair(timestamp, timestamp);
-            }
-            else if (events_timestamp[event_idx - 1].has_value())
-            {
-                auto first_timestamp = events_timestamp[event_idx - 1]->first;
-                bool time_matched = timestamp <= first_timestamp + window;
 
-                if (time_matched)
+            for (int j = 0; j < events_size; j++)
+            {
+                if (events_complete[j]) continue;
+
+                if (event_idx == j)
                 {
-                    events_timestamp[event_idx] = std::make_pair(first_timestamp, timestamp);
-                    if (event_idx + 1 == events_size)
+                    events_timestamp[j][j] = std::make_pair(timestamp, timestamp);
+                }
+                else if (event_idx > j && events_timestamp[j][event_idx - 1].has_value())
+                {
+                    auto first_timestamp = events_timestamp[j][event_idx - 1]->first;
+                    bool time_matched = timestamp <= first_timestamp + window;
+
+                    if (time_matched)
                     {
-                        for (size_t event = events_size; event > 0; --event)
-                            funnel.push_back(event);
-                        return funnel;
+                        events_timestamp[j][event_idx] = std::make_pair(first_timestamp, timestamp);
+                        if (event_idx + 1 == events_size)
+                        {
+                            events_complete[j] = true;
+                        }
                     }
                 }
             }
+
         }
 
+        for (size_t i = 0; i < events_size; i++)
+        {
+            std::vector<UInt8> currentFunnel;
+            collectFunnel(currentFunnel, events_timestamp[i]);
+
+            if (currentFunnel.size() > funnel.size())
+            {
+                funnel = std::move(currentFunnel);
+            }
+        }
+
+        return funnel;
+    }
+
+    void collectFunnel(std::vector<UInt8> & funnel, const std::vector<std::optional<std::pair<UInt64, UInt64>>> & events_timestamp) const
+    {
         bool chain_started = false;
         for (size_t event = events_timestamp.size(); event > 0; --event)
         {
@@ -523,7 +552,7 @@ private:
             }
         }
 
-        return funnel;
+        std::reverse(funnel.begin(), funnel.end());
     }
 
     std::vector<UInt8> getOpenEventsStrictOnce(const AggregateFunctionWindowFunnelStrictOnceData<T>::TimestampEvents & events_list) const
