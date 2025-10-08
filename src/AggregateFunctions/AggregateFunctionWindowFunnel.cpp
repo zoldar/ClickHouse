@@ -482,9 +482,45 @@ private:
     {
         std::vector<UInt8> funnel;
 
+        std::vector<std::optional<std::pair<UInt64, UInt64>>> events_timestamp(events_size);
         for (size_t i = 0; i < events_list.size(); ++i)
         {
-            continue;
+            const T & timestamp = events_list[i].first;
+            const auto & event_idx = events_list[i].second - 1;
+            if (event_idx == 0)
+            {
+                events_timestamp[0] = std::make_pair(timestamp, timestamp);
+            }
+            else if (events_timestamp[event_idx - 1].has_value())
+            {
+                auto first_timestamp = events_timestamp[event_idx - 1]->first;
+                bool time_matched = timestamp <= first_timestamp + window;
+
+                if (time_matched)
+                {
+                    events_timestamp[event_idx] = std::make_pair(first_timestamp, timestamp);
+                    if (event_idx + 1 == events_size)
+                    {
+                        for (size_t event = events_size; event > 0; --event)
+                            funnel.push_back(event);
+                        return funnel;
+                    }
+                }
+            }
+        }
+
+        bool chain_started = false;
+        for (size_t event = events_timestamp.size(); event > 0; --event)
+        {
+            if (events_timestamp[event - 1].has_value())
+            {
+                funnel.push_back(event);
+                chain_started = true;
+            }
+            else if (chain_started)
+            {
+                break;
+            }
         }
 
         return funnel;
